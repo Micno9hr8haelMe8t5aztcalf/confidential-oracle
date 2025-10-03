@@ -1,110 +1,27 @@
-import React, { useState, useEffect } from "react";
+import React, { useEffect, useState } from "react";
 import { ethers } from "ethers";
+import { getContractReadOnly, getContractWithSigner } from "./contract";
+import WalletManager from "./components/WalletManager";
+import WalletSelector from "./components/WalletSelector";
 import "./App.css";
 
-// Simulated contract interaction functions
-const getContractReadOnly = () => {
-  return {
-    isAvailable: async () => true,
-    setData: async (key: string, value: string) => {
-      console.log(`Setting data: ${key} = ${value}`);
-      return { wait: () => new Promise(resolve => setTimeout(resolve, 2000)) };
-    },
-    getData: async (key: string) => {
-      console.log(`Getting data for key: ${key}`);
-      return "EncryptedData-" + key;
-    }
-  };
-};
-
-const getContractWithSigner = () => {
-  return getContractReadOnly();
-};
-
-// Wallet Manager Component
-const WalletManager: React.FC<{ 
-  account: string, 
-  onConnect: () => void, 
-  onDisconnect: () => void 
-}> = ({ account, onConnect, onDisconnect }) => {
-  return (
-    <div className="wallet-manager">
-      {account ? (
-        <div className="wallet-info">
-          <div className="wallet-icon metal-icon"></div>
-          <div className="wallet-address">
-            {account.substring(0, 6)}...{account.substring(account.length - 4)}
-          </div>
-          <button 
-            className="metal-button disconnect-btn"
-            onClick={onDisconnect}
-          >
-            Disconnect
-          </button>
-        </div>
-      ) : (
-        <button 
-          className="metal-button connect-btn"
-          onClick={onConnect}
-        >
-          Connect Wallet
-        </button>
-      )}
-    </div>
-  );
-};
-
-// Wallet Selector Component
-const WalletSelector: React.FC<{ 
-  isOpen: boolean, 
-  onWalletSelect: (wallet: string) => void, 
-  onClose: () => void 
-}> = ({ isOpen, onWalletSelect, onClose }) => {
-  if (!isOpen) return null;
-
-  const wallets = ["MetaMask", "WalletConnect", "Coinbase Wallet", "Ledger"];
-
-  return (
-    <div className="wallet-selector-overlay">
-      <div className="wallet-selector metal-card">
-        <div className="selector-header">
-          <h3>Select Wallet</h3>
-          <button className="close-btn" onClick={onClose}>✕</button>
-        </div>
-        <div className="wallets-list">
-          {wallets.map(wallet => (
-            <div 
-              key={wallet}
-              className="wallet-option metal-button"
-              onClick={() => onWalletSelect(wallet)}
-            >
-              <div className={`wallet-icon ${wallet.toLowerCase().replace(' ', '-')}`}></div>
-              {wallet}
-            </div>
-          ))}
-        </div>
-      </div>
-    </div>
-  );
-};
-
-// Data Item Interface
-interface DataItem {
+interface OracleData {
   id: string;
-  key: string;
   encryptedValue: string;
   timestamp: number;
+  source: string;
+  status: "pending" | "aggregated" | "decrypted";
   decryptedValue?: string;
-  status: "encrypted" | "decrypting" | "decrypted";
 }
 
 const App: React.FC = () => {
   const [account, setAccount] = useState("");
   const [loading, setLoading] = useState(true);
-  const [dataItems, setDataItems] = useState<DataItem[]>([]);
+  const [oracleData, setOracleData] = useState<OracleData[]>([]);
+  const [provider, setProvider] = useState<ethers.BrowserProvider | null>(null);
   const [isRefreshing, setIsRefreshing] = useState(false);
-  const [showAddModal, setShowAddModal] = useState(false);
-  const [adding, setAdding] = useState(false);
+  const [showSubmitModal, setShowSubmitModal] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
   const [walletSelectorOpen, setWalletSelectorOpen] = useState(false);
   const [transactionStatus, setTransactionStatus] = useState<{
     visible: boolean;
@@ -112,69 +29,112 @@ const App: React.FC = () => {
     message: string;
   }>({ visible: false, status: "pending", message: "" });
   const [newData, setNewData] = useState({
-    key: "",
+    source: "",
     value: ""
   });
   const [showTutorial, setShowTutorial] = useState(false);
-  const [activeTab, setActiveTab] = useState("dashboard");
+  const [selectedData, setSelectedData] = useState<OracleData | null>(null);
+  const [showDetailModal, setShowDetailModal] = useState(false);
 
   // Calculate statistics
-  const encryptedCount = dataItems.filter(item => item.status === "encrypted").length;
-  const decryptingCount = dataItems.filter(item => item.status === "decrypting").length;
-  const decryptedCount = dataItems.filter(item => item.status === "decrypted").length;
+  const pendingCount = oracleData.filter(d => d.status === "pending").length;
+  const aggregatedCount = oracleData.filter(d => d.status === "aggregated").length;
+  const decryptedCount = oracleData.filter(d => d.status === "decrypted").length;
 
   useEffect(() => {
-    // Simulate loading data
-    setTimeout(() => {
-      setLoading(false);
-    }, 1500);
+    loadOracleData().finally(() => setLoading(false));
   }, []);
 
-  const onWalletSelect = async (wallet: string) => {
+  const onWalletSelect = async (wallet: any) => {
+    if (!wallet.provider) return;
     try {
-      // Simulate wallet connection
-      const address = `0x${Math.random().toString(36).substring(2, 10)}...${Math.random().toString(36).substring(2, 6)}`;
-      setAccount(address);
-      setWalletSelectorOpen(false);
+      const web3Provider = new ethers.BrowserProvider(wallet.provider);
+      setProvider(web3Provider);
+      const accounts = await web3Provider.send("eth_requestAccounts", []);
+      const acc = accounts[0] || "";
+      setAccount(acc);
+
+      wallet.provider.on("accountsChanged", async (accounts: string[]) => {
+        const newAcc = accounts[0] || "";
+        setAccount(newAcc);
+      });
     } catch (e) {
       alert("Failed to connect wallet");
     }
   };
 
   const onConnect = () => setWalletSelectorOpen(true);
-  const onDisconnect = () => setAccount("");
+  const onDisconnect = () => {
+    setAccount("");
+    setProvider(null);
+  };
 
-  const loadData = async () => {
+  const loadOracleData = async () => {
     setIsRefreshing(true);
     try {
       const contract = await getContractReadOnly();
       if (!contract) return;
       
-      // Check contract availability using FHE
+      // Check contract availability
       const isAvailable = await contract.isAvailable();
       if (!isAvailable) {
         console.error("Contract is not available");
         return;
       }
       
-      // Simulate loading data
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      const keysBytes = await contract.getData("oracle_keys");
+      let keys: string[] = [];
       
-      // In a real app, we would fetch actual data here
-      setIsRefreshing(false);
+      if (keysBytes.length > 0) {
+        try {
+          keys = JSON.parse(ethers.toUtf8String(keysBytes));
+        } catch (e) {
+          console.error("Error parsing oracle keys:", e);
+        }
+      }
+      
+      const list: OracleData[] = [];
+      
+      for (const key of keys) {
+        try {
+          const dataBytes = await contract.getData(`oracle_${key}`);
+          if (dataBytes.length > 0) {
+            try {
+              const data = JSON.parse(ethers.toUtf8String(dataBytes));
+              list.push({
+                id: key,
+                encryptedValue: data.value,
+                timestamp: data.timestamp,
+                source: data.source,
+                status: data.status || "pending",
+                decryptedValue: data.decryptedValue
+              });
+            } catch (e) {
+              console.error(`Error parsing data for ${key}:`, e);
+            }
+          }
+        } catch (e) {
+          console.error(`Error loading data ${key}:`, e);
+        }
+      }
+      
+      list.sort((a, b) => b.timestamp - a.timestamp);
+      setOracleData(list);
     } catch (e) {
-      console.error("Error loading data:", e);
+      console.error("Error loading oracle data:", e);
+    } finally {
       setIsRefreshing(false);
+      setLoading(false);
     }
   };
 
-  const addData = async () => {
-    if (!account) { 
+  const submitData = async () => {
+    if (!provider) { 
       alert("Please connect wallet first"); 
       return; 
     }
     
-    setAdding(true);
+    setSubmitting(true);
     setTransactionStatus({
       visible: true,
       status: "pending",
@@ -182,38 +142,62 @@ const App: React.FC = () => {
     });
     
     try {
+      // Simulate FHE encryption
+      const encryptedValue = `FHE-${btoa(newData.value)}`;
+      
       const contract = await getContractWithSigner();
       if (!contract) {
         throw new Error("Failed to get contract with signer");
       }
       
-      // Simulate FHE encryption
-      const encryptedValue = `FHE-${btoa(newData.value)}`;
-      
-      // Store encrypted data on-chain using FHE
-      await contract.setData(newData.key, encryptedValue);
-      
-      // Add to local state
-      const newItem: DataItem = {
-        id: `${Date.now()}`,
-        key: newData.key,
-        encryptedValue: encryptedValue,
+      const dataId = `${Date.now()}-${Math.random().toString(36).substring(2, 9)}`;
+
+      const oracleData = {
+        value: encryptedValue,
         timestamp: Math.floor(Date.now() / 1000),
-        status: "encrypted"
+        source: newData.source,
+        status: "pending"
       };
       
-      setDataItems(prev => [newItem, ...prev]);
+      // Store encrypted data on-chain
+      await contract.setData(
+        `oracle_${dataId}`, 
+        ethers.toUtf8Bytes(JSON.stringify(oracleData))
+      );
+      
+      const keysBytes = await contract.getData("oracle_keys");
+      let keys: string[] = [];
+      
+      if (keysBytes.length > 0) {
+        try {
+          keys = JSON.parse(ethers.toUtf8String(keysBytes));
+        } catch (e) {
+          console.error("Error parsing keys:", e);
+        }
+      }
+      
+      keys.push(dataId);
+      
+      await contract.setData(
+        "oracle_keys", 
+        ethers.toUtf8Bytes(JSON.stringify(keys))
+      );
       
       setTransactionStatus({
         visible: true,
         status: "success",
-        message: "Data encrypted and stored securely!"
+        message: "Encrypted data submitted successfully!"
       });
+      
+      await loadOracleData();
       
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
-        setShowAddModal(false);
-        setNewData({ key: "", value: "" });
+        setShowSubmitModal(false);
+        setNewData({
+          source: "",
+          value: ""
+        });
       }, 2000);
     } catch (e: any) {
       const errorMessage = e.message.includes("user rejected transaction")
@@ -230,12 +214,83 @@ const App: React.FC = () => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
       }, 3000);
     } finally {
-      setAdding(false);
+      setSubmitting(false);
     }
   };
 
-  const decryptData = async (id: string) => {
-    if (!account) {
+  const aggregateData = async () => {
+    if (!provider) {
+      alert("Please connect wallet first");
+      return;
+    }
+
+    setTransactionStatus({
+      visible: true,
+      status: "pending",
+      message: "Aggregating encrypted data with FHE..."
+    });
+
+    try {
+      // Simulate FHE computation time
+      await new Promise(resolve => setTimeout(resolve, 3000));
+      
+      const contract = await getContractWithSigner();
+      if (!contract) {
+        throw new Error("Failed to get contract with signer");
+      }
+      
+      // Update all pending data to aggregated status
+      const keysBytes = await contract.getData("oracle_keys");
+      let keys: string[] = [];
+      
+      if (keysBytes.length > 0) {
+        try {
+          keys = JSON.parse(ethers.toUtf8String(keysBytes));
+        } catch (e) {
+          console.error("Error parsing keys:", e);
+        }
+      }
+      
+      for (const key of keys) {
+        const dataBytes = await contract.getData(`oracle_${key}`);
+        if (dataBytes.length === 0) continue;
+        
+        const data = JSON.parse(ethers.toUtf8String(dataBytes));
+        if (data.status === "pending") {
+          data.status = "aggregated";
+          await contract.setData(
+            `oracle_${key}`, 
+            ethers.toUtf8Bytes(JSON.stringify(data))
+          );
+        }
+      }
+      
+      setTransactionStatus({
+        visible: true,
+        status: "success",
+        message: "FHE aggregation completed successfully!"
+      });
+      
+      await loadOracleData();
+      
+      setTimeout(() => {
+        setTransactionStatus({ visible: false, status: "pending", message: "" });
+      }, 2000);
+    } catch (e: any) {
+      setTransactionStatus({
+        visible: true,
+        status: "error",
+        message: "Aggregation failed: " + (e.message || "Unknown error")
+      });
+      
+      setTimeout(() => {
+        setTransactionStatus({ visible: false, status: "pending", message: "" });
+      }, 3000);
+    }
+  };
+
+  const decryptData = async (dataId: string) => {
+    if (!provider) {
       alert("Please connect wallet first");
       return;
     }
@@ -247,35 +302,42 @@ const App: React.FC = () => {
     });
 
     try {
-      // Update item status to decrypting
-      setDataItems(prev => prev.map(item => 
-        item.id === id ? {...item, status: "decrypting"} : item
-      ));
-
-      // Simulate FHE decryption time
+      // Simulate FHE computation time
       await new Promise(resolve => setTimeout(resolve, 3000));
       
-      // Find the item and decrypt
-      const updatedItems = dataItems.map(item => {
-        if (item.id === id) {
-          // Simulate decryption
-          const decryptedValue = atob(item.encryptedValue.replace("FHE-", ""));
-          return {
-            ...item,
-            decryptedValue,
-            status: "decrypted"
-          };
-        }
-        return item;
-      });
+      const contract = await getContractWithSigner();
+      if (!contract) {
+        throw new Error("Failed to get contract with signer");
+      }
       
-      setDataItems(updatedItems);
+      const dataBytes = await contract.getData(`oracle_${dataId}`);
+      if (dataBytes.length === 0) {
+        throw new Error("Data not found");
+      }
+      
+      const data = JSON.parse(ethers.toUtf8String(dataBytes));
+      
+      // Simulate decryption
+      if (data.value.startsWith("FHE-")) {
+        data.decryptedValue = atob(data.value.substring(4));
+      } else {
+        data.decryptedValue = "Decryption failed";
+      }
+      
+      data.status = "decrypted";
+      
+      await contract.setData(
+        `oracle_${dataId}`, 
+        ethers.toUtf8Bytes(JSON.stringify(data))
+      );
       
       setTransactionStatus({
         visible: true,
         status: "success",
-        message: "Data decrypted successfully!"
+        message: "FHE decryption completed successfully!"
       });
+      
+      await loadOracleData();
       
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
@@ -287,56 +349,15 @@ const App: React.FC = () => {
         message: "Decryption failed: " + (e.message || "Unknown error")
       });
       
-      // Reset item status
-      setDataItems(prev => prev.map(item => 
-        item.id === id ? {...item, status: "encrypted"} : item
-      ));
-      
       setTimeout(() => {
         setTransactionStatus({ visible: false, status: "pending", message: "" });
       }, 3000);
     }
   };
 
-  const checkAvailability = async () => {
-    setTransactionStatus({
-      visible: true,
-      status: "pending",
-      message: "Checking contract availability..."
-    });
-
-    try {
-      const contract = await getContractReadOnly();
-      const isAvailable = await contract.isAvailable();
-      
-      if (isAvailable) {
-        setTransactionStatus({
-          visible: true,
-          status: "success",
-          message: "Contract is available and FHE-ready!"
-        });
-      } else {
-        setTransactionStatus({
-          visible: true,
-          status: "error",
-          message: "Contract is not available"
-        });
-      }
-      
-      setTimeout(() => {
-        setTransactionStatus({ visible: false, status: "pending", message: "" });
-      }, 2000);
-    } catch (e) {
-      setTransactionStatus({
-        visible: true,
-        status: "error",
-        message: "Availability check failed"
-      });
-      
-      setTimeout(() => {
-        setTransactionStatus({ visible: false, status: "pending", message: "" });
-      }, 3000);
-    }
+  const viewDataDetails = (data: OracleData) => {
+    setSelectedData(data);
+    setShowDetailModal(true);
   };
 
   const tutorialSteps = [
@@ -347,55 +368,55 @@ const App: React.FC = () => {
     },
     {
       title: "Submit Encrypted Data",
-      description: "Add your sensitive data which will be encrypted using FHE",
+      description: "Add your encrypted data to the oracle network",
       icon: "🔒"
     },
     {
-      title: "FHE Data Aggregation",
-      description: "Oracle nodes aggregate encrypted data without decryption",
-      icon: "📊"
+      title: "FHE Aggregation",
+      description: "Aggregate encrypted data from multiple sources",
+      icon: "⚙️"
     },
     {
       title: "On-Demand Decryption",
-      description: "Decrypt aggregated results only when needed",
+      description: "Decrypt aggregated results when needed",
       icon: "🔓"
     }
   ];
 
-  const renderPieChart = () => {
-    const total = dataItems.length || 1;
-    const encryptedPercentage = (encryptedCount / total) * 100;
-    const decryptingPercentage = (decryptingCount / total) * 100;
+  const renderStatusChart = () => {
+    const total = oracleData.length || 1;
+    const pendingPercentage = (pendingCount / total) * 100;
+    const aggregatedPercentage = (aggregatedCount / total) * 100;
     const decryptedPercentage = (decryptedCount / total) * 100;
 
     return (
       <div className="pie-chart-container">
         <div className="pie-chart">
           <div 
-            className="pie-segment encrypted" 
-            style={{ transform: `rotate(${encryptedPercentage * 3.6}deg)` }}
+            className="pie-segment pending" 
+            style={{ transform: `rotate(${pendingPercentage * 3.6}deg)` }}
           ></div>
           <div 
-            className="pie-segment decrypting" 
-            style={{ transform: `rotate(${(encryptedPercentage + decryptingPercentage) * 3.6}deg)` }}
+            className="pie-segment aggregated" 
+            style={{ transform: `rotate(${(pendingPercentage + aggregatedPercentage) * 3.6}deg)` }}
           ></div>
           <div 
             className="pie-segment decrypted" 
-            style={{ transform: `rotate(${(encryptedPercentage + decryptingPercentage + decryptedPercentage) * 3.6}deg)` }}
+            style={{ transform: `rotate(${(pendingPercentage + aggregatedPercentage + decryptedPercentage) * 3.6}deg)` }}
           ></div>
           <div className="pie-center">
-            <div className="pie-value">{dataItems.length}</div>
-            <div className="pie-label">Data Items</div>
+            <div className="pie-value">{oracleData.length}</div>
+            <div className="pie-label">Data Points</div>
           </div>
         </div>
         <div className="pie-legend">
           <div className="legend-item">
-            <div className="color-box encrypted"></div>
-            <span>Encrypted: {encryptedCount}</span>
+            <div className="color-box pending"></div>
+            <span>Pending: {pendingCount}</span>
           </div>
           <div className="legend-item">
-            <div className="color-box decrypting"></div>
-            <span>Decrypting: {decryptingCount}</span>
+            <div className="color-box aggregated"></div>
+            <span>Aggregated: {aggregatedCount}</span>
           </div>
           <div className="legend-item">
             <div className="color-box decrypted"></div>
@@ -420,182 +441,39 @@ const App: React.FC = () => {
           <div className="logo-icon">
             <div className="shield-icon"></div>
           </div>
-          <h1>FHE<span>Oracle</span></h1>
-        </div>
-        
-        <div className="header-tabs">
-          <button 
-            className={`tab-button ${activeTab === "dashboard" ? "active" : ""}`}
-            onClick={() => setActiveTab("dashboard")}
-          >
-            Dashboard
-          </button>
-          <button 
-            className={`tab-button ${activeTab === "data" ? "active" : ""}`}
-            onClick={() => setActiveTab("data")}
-          >
-            Data Explorer
-          </button>
-          <button 
-            className={`tab-button ${activeTab === "tutorial" ? "active" : ""}`}
-            onClick={() => setActiveTab("tutorial")}
-          >
-            Tutorial
-          </button>
+          <h1>FHE<span>Oracle</span>Aggregator</h1>
         </div>
         
         <div className="header-actions">
           <button 
-            onClick={() => setShowAddModal(true)} 
-            className="metal-button primary"
+            onClick={() => setShowSubmitModal(true)} 
+            className="submit-data-btn metal-button"
           >
-            Add Data
+            <div className="add-icon"></div>
+            Submit Data
           </button>
           <button 
             className="metal-button"
-            onClick={checkAvailability}
+            onClick={() => setShowTutorial(!showTutorial)}
           >
-            Check FHE Status
+            {showTutorial ? "Hide Tutorial" : "Show Tutorial"}
           </button>
           <WalletManager account={account} onConnect={onConnect} onDisconnect={onDisconnect} />
         </div>
       </header>
       
       <div className="main-content">
-        {activeTab === "dashboard" && (
-          <div className="dashboard-panels">
-            <div className="panel metal-card">
-              <h2>FHE Oracle Overview</h2>
-              <p>Secure, decentralized oracle that aggregates encrypted data from multiple sources using Fully Homomorphic Encryption (FHE).</p>
-              
-              <div className="fhe-features">
-                <div className="feature">
-                  <div className="feature-icon">🔐</div>
-                  <h3>Encrypted Data Submission</h3>
-                  <p>Data providers submit encrypted information to the oracle network</p>
-                </div>
-                <div className="feature">
-                  <div className="feature-icon">📊</div>
-                  <h3>FHE Data Aggregation</h3>
-                  <p>Oracle nodes compute aggregated results without decrypting data</p>
-                </div>
-                <div className="feature">
-                  <div className="feature-icon">🔓</div>
-                  <h3>On-Demand Decryption</h3>
-                  <p>Results remain encrypted until specifically requested for decryption</p>
-                </div>
-              </div>
-            </div>
-            
-            <div className="panel metal-card">
-              <h2>Data Statistics</h2>
-              <div className="stats-grid">
-                <div className="stat-item">
-                  <div className="stat-value">{dataItems.length}</div>
-                  <div className="stat-label">Total Data Items</div>
-                </div>
-                <div className="stat-item">
-                  <div className="stat-value">{encryptedCount}</div>
-                  <div className="stat-label">Encrypted</div>
-                </div>
-                <div className="stat-item">
-                  <div className="stat-value">{decryptingCount}</div>
-                  <div className="stat-label">Decrypting</div>
-                </div>
-                <div className="stat-item">
-                  <div className="stat-value">{decryptedCount}</div>
-                  <div className="stat-label">Decrypted</div>
-                </div>
-              </div>
-            </div>
-            
-            <div className="panel metal-card">
-              <h2>Data Status Distribution</h2>
-              {dataItems.length > 0 ? renderPieChart() : (
-                <div className="no-data-chart">
-                  <p>No data available</p>
-                </div>
-              )}
-            </div>
+        <div className="welcome-banner">
+          <div className="welcome-text">
+            <h2>Fully Homomorphic Encryption Oracle</h2>
+            <p>Securely aggregate and decrypt sensitive data on-chain</p>
           </div>
-        )}
+        </div>
         
-        {activeTab === "data" && (
-          <div className="data-explorer">
-            <div className="explorer-header">
-              <h2>Encrypted Data Explorer</h2>
-              <div className="header-actions">
-                <button 
-                  onClick={loadData}
-                  className="metal-button"
-                  disabled={isRefreshing}
-                >
-                  {isRefreshing ? "Refreshing..." : "Refresh Data"}
-                </button>
-              </div>
-            </div>
-            
-            <div className="data-list metal-card">
-              <div className="table-header">
-                <div className="header-cell">Key</div>
-                <div className="header-cell">Encrypted Value</div>
-                <div className="header-cell">Timestamp</div>
-                <div className="header-cell">Status</div>
-                <div className="header-cell">Actions</div>
-              </div>
-              
-              {dataItems.length === 0 ? (
-                <div className="no-data">
-                  <div className="no-data-icon"></div>
-                  <p>No encrypted data found</p>
-                  <button 
-                    className="metal-button primary"
-                    onClick={() => setShowAddModal(true)}
-                  >
-                    Add First Data Item
-                  </button>
-                </div>
-              ) : (
-                dataItems.map(item => (
-                  <div className="data-row" key={item.id}>
-                    <div className="table-cell">{item.key}</div>
-                    <div className="table-cell encrypted-value">
-                      {item.encryptedValue.substring(0, 20)}...
-                    </div>
-                    <div className="table-cell">
-                      {new Date(item.timestamp * 1000).toLocaleString()}
-                    </div>
-                    <div className="table-cell">
-                      <span className={`status-badge ${item.status}`}>
-                        {item.status}
-                      </span>
-                    </div>
-                    <div className="table-cell actions">
-                      {item.status === "encrypted" && (
-                        <button 
-                          className="action-btn metal-button"
-                          onClick={() => decryptData(item.id)}
-                        >
-                          Decrypt
-                        </button>
-                      )}
-                      {item.status === "decrypted" && (
-                        <div className="decrypted-value">
-                          {item.decryptedValue}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-                ))
-              )}
-            </div>
-          </div>
-        )}
-        
-        {activeTab === "tutorial" && (
-          <div className="tutorial-section metal-card">
+        {showTutorial && (
+          <div className="tutorial-section">
             <h2>FHE Oracle Tutorial</h2>
-            <p className="subtitle">Learn how to securely process sensitive data with FHE</p>
+            <p className="subtitle">Learn how to securely process encrypted data</p>
             
             <div className="tutorial-steps">
               {tutorialSteps.map((step, index) => (
@@ -603,7 +481,6 @@ const App: React.FC = () => {
                   className="tutorial-step"
                   key={index}
                 >
-                  <div className="step-number">{index + 1}</div>
                   <div className="step-icon">{step.icon}</div>
                   <div className="step-content">
                     <h3>{step.title}</h3>
@@ -612,105 +489,159 @@ const App: React.FC = () => {
                 </div>
               ))}
             </div>
-            
-            <div className="fhe-explanation">
-              <h3>How FHE Protects Your Data</h3>
-              <p>
-                Fully Homomorphic Encryption (FHE) allows computations to be performed directly on encrypted data 
-                without needing to decrypt it first. This means sensitive information remains protected throughout 
-                the entire aggregation process in the oracle network.
-              </p>
-              <div className="fhe-process">
-                <div className="process-step">
-                  <div className="step-icon">🔐</div>
-                  <div className="step-text">Data encrypted at source</div>
-                </div>
-                <div className="process-arrow">→</div>
-                <div className="process-step">
-                  <div className="step-icon">📡</div>
-                  <div className="step-text">Sent to oracle nodes</div>
-                </div>
-                <div className="process-arrow">→</div>
-                <div className="process-step">
-                  <div className="step-icon">🧮</div>
-                  <div className="step-text">Computations on encrypted data</div>
-                </div>
-                <div className="process-arrow">→</div>
-                <div className="process-step">
-                  <div className="step-icon">📊</div>
-                  <div className="step-text">Encrypted results stored</div>
-                </div>
-                <div className="process-arrow">→</div>
-                <div className="process-step">
-                  <div className="step-icon">🔓</div>
-                  <div className="step-text">Decrypted only when needed</div>
-                </div>
-              </div>
-            </div>
           </div>
         )}
-      </div>
-  
-      {showAddModal && (
-        <div className="modal-overlay">
-          <div className="add-modal metal-card">
-            <div className="modal-header">
-              <h2>Add Encrypted Data</h2>
-              <button onClick={() => setShowAddModal(false)} className="close-modal">✕</button>
-            </div>
-            
-            <div className="modal-body">
-              <div className="fhe-notice">
-                <div className="lock-icon"></div>
-                <span>Data will be encrypted using FHE before storage</span>
-              </div>
-              
-              <div className="form-group">
-                <label>Data Key *</label>
-                <input 
-                  type="text"
-                  value={newData.key}
-                  onChange={e => setNewData({...newData, key: e.target.value})}
-                  placeholder="Enter data key (e.g. price.eth.usd)" 
-                  className="metal-input"
-                />
-              </div>
-              
-              <div className="form-group">
-                <label>Data Value *</label>
-                <textarea 
-                  value={newData.value}
-                  onChange={e => setNewData({...newData, value: e.target.value})}
-                  placeholder="Enter sensitive data value" 
-                  className="metal-textarea"
-                  rows={3}
-                />
-              </div>
-            </div>
-            
-            <div className="modal-footer">
-              <button 
-                onClick={() => setShowAddModal(false)}
-                className="metal-button"
-              >
-                Cancel
-              </button>
-              <button 
-                onClick={addData} 
-                disabled={adding || !newData.key || !newData.value}
-                className="metal-button primary"
-              >
-                {adding ? "Encrypting with FHE..." : "Submit Encrypted Data"}
-              </button>
+        
+        <div className="dashboard-grid">
+          <div className="dashboard-card metal-card">
+            <h3>Project Introduction</h3>
+            <p>FHE Oracle enables secure aggregation of encrypted data from multiple sources and on-demand decryption using fully homomorphic encryption.</p>
+            <div className="fhe-badge">
+              <span>FHE-Powered</span>
             </div>
           </div>
+          
+          <div className="dashboard-card metal-card">
+            <h3>Data Statistics</h3>
+            <div className="stats-grid">
+              <div className="stat-item">
+                <div className="stat-value">{oracleData.length}</div>
+                <div className="stat-label">Total Data</div>
+              </div>
+              <div className="stat-item">
+                <div className="stat-value">{pendingCount}</div>
+                <div className="stat-label">Pending</div>
+              </div>
+              <div className="stat-item">
+                <div className="stat-value">{aggregatedCount}</div>
+                <div className="stat-label">Aggregated</div>
+              </div>
+              <div className="stat-item">
+                <div className="stat-value">{decryptedCount}</div>
+                <div className="stat-label">Decrypted</div>
+              </div>
+            </div>
+          </div>
+          
+          <div className="dashboard-card metal-card">
+            <h3>Status Distribution</h3>
+            {renderStatusChart()}
+          </div>
         </div>
+        
+        <div className="actions-panel">
+          <button 
+            className="metal-button primary"
+            onClick={() => {
+              const contract = getContractReadOnly();
+              if (contract) {
+                contract.isAvailable().then(() => {
+                  alert("Contract is available and ready");
+                });
+              }
+            }}
+          >
+            Check Availability
+          </button>
+          
+          <button 
+            className="metal-button primary"
+            onClick={aggregateData}
+          >
+            Aggregate Data
+          </button>
+          
+          <button 
+            onClick={loadOracleData}
+            className="refresh-btn metal-button"
+            disabled={isRefreshing}
+          >
+            {isRefreshing ? "Refreshing..." : "Refresh Data"}
+          </button>
+        </div>
+        
+        <div className="data-section">
+          <div className="section-header">
+            <h2>Encrypted Oracle Data</h2>
+          </div>
+          
+          <div className="data-list metal-card">
+            <div className="table-header">
+              <div className="header-cell">ID</div>
+              <div className="header-cell">Source</div>
+              <div className="header-cell">Timestamp</div>
+              <div className="header-cell">Status</div>
+              <div className="header-cell">Actions</div>
+            </div>
+            
+            {oracleData.length === 0 ? (
+              <div className="no-data">
+                <div className="no-data-icon"></div>
+                <p>No encrypted data found</p>
+                <button 
+                  className="metal-button primary"
+                  onClick={() => setShowSubmitModal(true)}
+                >
+                  Submit First Data
+                </button>
+              </div>
+            ) : (
+              oracleData.map(data => (
+                <div className="data-row" key={data.id}>
+                  <div className="table-cell data-id">#{data.id.substring(0, 6)}</div>
+                  <div className="table-cell">{data.source}</div>
+                  <div className="table-cell">
+                    {new Date(data.timestamp * 1000).toLocaleDateString()}
+                  </div>
+                  <div className="table-cell">
+                    <span className={`status-badge ${data.status}`}>
+                      {data.status}
+                    </span>
+                  </div>
+                  <div className="table-cell actions">
+                    <button 
+                      className="action-btn metal-button"
+                      onClick={() => viewDataDetails(data)}
+                    >
+                      Details
+                    </button>
+                    {data.status === "aggregated" && (
+                      <button 
+                        className="action-btn metal-button primary"
+                        onClick={() => decryptData(data.id)}
+                      >
+                        Decrypt
+                      </button>
+                    )}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        </div>
+      </div>
+  
+      {showSubmitModal && (
+        <ModalSubmit 
+          onSubmit={submitData} 
+          onClose={() => setShowSubmitModal(false)} 
+          submitting={submitting}
+          data={newData}
+          setData={setNewData}
+        />
+      )}
+      
+      {showDetailModal && selectedData && (
+        <ModalDetail 
+          data={selectedData} 
+          onClose={() => setShowDetailModal(false)}
+        />
       )}
       
       {walletSelectorOpen && (
         <WalletSelector
           isOpen={walletSelectorOpen}
-          onWalletSelect={onWalletSelect}
+          onWalletSelect={(wallet) => { onWalletSelect(wallet); setWalletSelectorOpen(false); }}
           onClose={() => setWalletSelectorOpen(false)}
         />
       )}
@@ -720,8 +651,8 @@ const App: React.FC = () => {
           <div className="transaction-content metal-card">
             <div className={`transaction-icon ${transactionStatus.status}`}>
               {transactionStatus.status === "pending" && <div className="metal-spinner"></div>}
-              {transactionStatus.status === "success" && <div className="check-icon">✓</div>}
-              {transactionStatus.status === "error" && <div className="error-icon">✕</div>}
+              {transactionStatus.status === "success" && <div className="check-icon"></div>}
+              {transactionStatus.status === "error" && <div className="error-icon"></div>}
             </div>
             <div className="transaction-message">
               {transactionStatus.message}
@@ -735,7 +666,7 @@ const App: React.FC = () => {
           <div className="footer-brand">
             <div className="logo">
               <div className="shield-icon"></div>
-              <span>FHE Oracle</span>
+              <span>FHE Oracle Aggregator</span>
             </div>
             <p>Secure encrypted data aggregation using FHE technology</p>
           </div>
@@ -750,13 +681,180 @@ const App: React.FC = () => {
         
         <div className="footer-bottom">
           <div className="fhe-badge">
-            <span>FHE-Powered Confidential Computing</span>
+            <span>FHE-Powered Privacy</span>
           </div>
           <div className="copyright">
-            © {new Date().getFullYear()} FHE Oracle. All rights reserved.
+            © {new Date().getFullYear()} FHE Oracle Aggregator. All rights reserved.
           </div>
         </div>
       </footer>
+    </div>
+  );
+};
+
+interface ModalSubmitProps {
+  onSubmit: () => void; 
+  onClose: () => void; 
+  submitting: boolean;
+  data: any;
+  setData: (data: any) => void;
+}
+
+const ModalSubmit: React.FC<ModalSubmitProps> = ({ 
+  onSubmit, 
+  onClose, 
+  submitting,
+  data,
+  setData
+}) => {
+  const handleChange = (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement>) => {
+    const { name, value } = e.target;
+    setData({
+      ...data,
+      [name]: value
+    });
+  };
+
+  const handleSubmit = () => {
+    if (!data.source || !data.value) {
+      alert("Please fill required fields");
+      return;
+    }
+    
+    onSubmit();
+  };
+
+  return (
+    <div className="modal-overlay">
+      <div className="submit-modal metal-card">
+        <div className="modal-header">
+          <h2>Submit Encrypted Data</h2>
+          <button onClick={onClose} className="close-modal">&times;</button>
+        </div>
+        
+        <div className="modal-body">
+          <div className="fhe-notice-banner">
+            <div className="key-icon"></div> Your data will be encrypted with FHE
+          </div>
+          
+          <div className="form-grid">
+            <div className="form-group">
+              <label>Data Source *</label>
+              <input 
+                type="text"
+                name="source"
+                value={data.source} 
+                onChange={handleChange}
+                placeholder="Data source name..." 
+                className="metal-input"
+              />
+            </div>
+            
+            <div className="form-group full-width">
+              <label>Data Value *</label>
+              <textarea 
+                name="value"
+                value={data.value} 
+                onChange={handleChange}
+                placeholder="Enter data to encrypt..." 
+                className="metal-textarea"
+                rows={4}
+              />
+            </div>
+          </div>
+          
+          <div className="privacy-notice">
+            <div className="privacy-icon"></div> Data remains encrypted during FHE processing
+          </div>
+        </div>
+        
+        <div className="modal-footer">
+          <button 
+            onClick={onClose}
+            className="cancel-btn metal-button"
+          >
+            Cancel
+          </button>
+          <button 
+            onClick={handleSubmit} 
+            disabled={submitting}
+            className="submit-btn metal-button primary"
+          >
+            {submitting ? "Encrypting with FHE..." : "Submit Securely"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+};
+
+interface ModalDetailProps {
+  data: OracleData;
+  onClose: () => void;
+}
+
+const ModalDetail: React.FC<ModalDetailProps> = ({ data, onClose }) => {
+  return (
+    <div className="modal-overlay">
+      <div className="detail-modal metal-card">
+        <div className="modal-header">
+          <h2>Data Details</h2>
+          <button onClick={onClose} className="close-modal">&times;</button>
+        </div>
+        
+        <div className="modal-body">
+          <div className="detail-grid">
+            <div className="detail-item">
+              <span className="detail-label">ID:</span>
+              <span className="detail-value">{data.id}</span>
+            </div>
+            
+            <div className="detail-item">
+              <span className="detail-label">Source:</span>
+              <span className="detail-value">{data.source}</span>
+            </div>
+            
+            <div className="detail-item">
+              <span className="detail-label">Timestamp:</span>
+              <span className="detail-value">
+                {new Date(data.timestamp * 1000).toLocaleString()}
+              </span>
+            </div>
+            
+            <div className="detail-item">
+              <span className="detail-label">Status:</span>
+              <span className={`detail-value status-badge ${data.status}`}>
+                {data.status}
+              </span>
+            </div>
+            
+            <div className="detail-item full-width">
+              <span className="detail-label">Encrypted Value:</span>
+              <div className="encrypted-value">
+                {data.encryptedValue}
+              </div>
+            </div>
+            
+            {data.status === "decrypted" && data.decryptedValue && (
+              <div className="detail-item full-width">
+                <span className="detail-label">Decrypted Value:</span>
+                <div className="decrypted-value">
+                  {data.decryptedValue}
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+        
+        <div className="modal-footer">
+          <button 
+            onClick={onClose}
+            className="close-btn metal-button"
+          >
+            Close
+          </button>
+        </div>
+      </div>
     </div>
   );
 };
